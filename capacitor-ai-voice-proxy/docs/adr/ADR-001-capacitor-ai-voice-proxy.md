@@ -1,28 +1,28 @@
 # ADR-001: Serverless AI Voice Proxy for Capacitor Hybrid Applications
 
- Status:  Accepted  
- Date:  2026-05-22  
- Author:  Naga Raghu Kishore, Penujuri 
- Project:  KashRA — Privacy-first Personal Finance App  
- Repository:  capacitor-ai-voice-proxy (MIT License)
+**Status:** Accepted  
+**Date:** 2026-05-22  
+**Author:** Naga Raghu Kishore, Penujuri 
+**Project:** KashRA — Privacy-first Personal Finance App  
+**Repository:** `capacitor-ai-voice-proxy` (MIT License)
 
 ---
 
-**Context**
+## Context
 
 KashRA is a Capacitor 8 hybrid application targeting iOS and Android. The app required a full-duplex AI voice interface — users speak financial questions, receive spoken AI responses — with the following hard constraints:
 
--  Zero server infrastructure  — no Express/Node backend, no cloud functions to maintain
--  API key security  — Google STT/TTS and Anthropic keys must never be exposed to the client
--  Per-user quota enforcement  — AI voice calls must be gated by Firebase Auth and usage limits
--  Cross-platform parity  — identical behaviour on iOS (WKWebView) and Android (WebView)
--  Multilingual  — English, Hindi, Telugu, Tamil, Kannada, Malayalam (NRI user base)
+- **Zero server infrastructure** — no Express/Node backend, no cloud functions to maintain
+- **API key security** — Google STT/TTS and Anthropic keys must never be exposed to the client
+- **Per-user quota enforcement** — AI voice calls must be gated by Firebase Auth and usage limits
+- **Cross-platform parity** — identical behaviour on iOS (WKWebView) and Android (WebView)
+- **Multilingual** — English, Hindi, Telugu, Tamil, Kannada, Malayalam (NRI user base)
 
-  # The Problem with Existing Approaches
+### The Problem with Existing Approaches
 
 | Approach | Problem |
 |----------|---------|
-| @capacitor-community/speech-recognition | Uses `SFSpeechRecognizer` on iOS — does not bridge reliably into WKWebView JS context; permission prompts broken in Capacitor 8 |
+| `@capacitor-community/speech-recognition` | Uses `SFSpeechRecognizer` on iOS — does not bridge reliably into WKWebView JS context; permission prompts broken in Capacitor 8 |
 | Native Capacitor plugin (Swift/Kotlin) | Platform-specific code for every API; maintenance burden; cannot enforce per-user server-side quota |
 | Direct Google STT/TTS API calls from JS | Exposes API keys in client bundle — trivially extractable from APK/IPA |
 | Backend server (Node/Express) | Infrastructure cost, cold starts, ops burden — incompatible with zero-server architecture |
@@ -32,22 +32,22 @@ None of these solved all constraints simultaneously.
 
 ---
 
- **Decision**
+## Decision
 
-Implement a  Cloudflare Worker as a stateless authenticated proxy  that:
+Implement a **Cloudflare Worker as a stateless authenticated proxy** that:
 
 1. Verifies Firebase ID tokens using Google's public JWK endpoint (no SDK dependency)
 2. Proxies Google Cloud Speech-to-Text (STT) for voice transcription
 3. Proxies Google Cloud Text-to-Speech (TTS) for Neural2/WaveNet voice synthesis
 4. Enforces per-user quota via Firestore without exposing credentials
 
-The client-side implementation uses  standard Web APIs only  — `navigator.mediaDevices.getUserMedia`, `MediaRecorder`, `Web Audio API`, and `fetch` — requiring zero native plugins.
+The client-side implementation uses **standard Web APIs only** — `navigator.mediaDevices.getUserMedia`, `MediaRecorder`, `Web Audio API`, and `fetch` — requiring zero native plugins.
 
 ---
 
-  ** Architecture**
+## Architecture
 
-
+ 
 ┌─────────────────────────────────────────────────┐
 │           Capacitor App (WKWebView / WebView)    │
 │                                                  │
@@ -76,15 +76,15 @@ The client-side implementation uses  standard Web APIs only  — `navigator.medi
 │                                                  │
 │  Secrets: GOOGLE_SPEECH_API_KEY (never exposed)  │
 └─────────────────────────────────────────────────┘
-
+ 
 
 ---
 
-  ** Implementation Details**
+## Implementation Details
 
-  # 1. Audio Capture (Client)
+### 1. Audio Capture (Client)
 
-javascript
+ javascript
 // Critical: timeslice=250 required on iOS WKWebView
 // Without it, MediaRecorder buffers only ~3s before data loss
 _voiceMediaRecorder.start(250);
@@ -104,15 +104,15 @@ async function _audioToLinear16Base64(blob) {
   // ... (44-byte WAV header construction)
   return btoa(binary);
 }
+ 
 
+**Key finding:** `MediaRecorder.start()` without a timeslice argument causes WKWebView on iOS to buffer only the first 2–3 seconds of audio before silently discarding subsequent data. Passing `timeslice: 250` forces `ondataavailable` to fire every 250ms, ensuring continuous chunk collection regardless of recording duration.
 
- Key finding:  `MediaRecorder.start()` without a timeslice argument causes WKWebView on iOS to buffer only the first 2–3 seconds of audio before silently discarding subsequent data. Passing `timeslice: 250` forces `ondataavailable` to fire every 250ms, ensuring continuous chunk collection regardless of recording duration.
-
-  # 2. Firebase Token Verification (Worker)
+### 2. Firebase Token Verification (Worker)
 
 The Worker verifies tokens using only the Web Crypto API — no Firebase Admin SDK, no Node.js:
 
-javascript
+ javascript
 async function verifyFirebaseToken(idToken, env) {
   const [header, payload, sig] = idToken.split('.');
   const { kid } = jsonFromB64(header);
@@ -132,11 +132,11 @@ async function verifyFirebaseToken(idToken, env) {
   );
   return valid ? { ok: true, uid: jsonFromB64(payload).user_id } : { ok: false };
 }
+ 
 
+### 3. STT Route (Worker)
 
-  # 3. STT Route (Worker)
-
-javascript
+ javascript
 if (request.method === 'POST' && url.pathname === '/transcribe') {
   const { ok, uid } = await verifyFirebaseToken(idToken, env);
   if (!ok) return error(401, 'auth_invalid');
@@ -162,11 +162,11 @@ if (request.method === 'POST' && url.pathname === '/transcribe') {
   const { results } = await sttResp.json();
   return json({ transcript: results?.[0]?.alternatives?.[0]?.transcript || '' });
 }
+ 
 
+### 4. TTS Route (Worker)
 
-  # 4. TTS Route (Worker)
-
-javascript
+ javascript
 // Voice selection: Neural2 for English, WaveNet for Indian languages
 // Note: Google Neural2 voices are NOT available for Indian languages as of 2026
 const voiceMap = {
@@ -185,13 +185,13 @@ audioConfig: {
   pitch: -1.0,
   effectsProfileId: ['headphone-class-device']
 }
+ 
 
-
-  # 5. iOS Audio Playback (Client)
+### 5. iOS Audio Playback (Client)
 
 iOS WKWebView requires a user gesture before `HTMLAudioElement.play()` is permitted. The solution is to reuse a single persistent `<audio>` element created during a user interaction (the TTS toggle button tap), rather than creating a `new Audio()` programmatically:
 
-javascript
+ javascript
 // Created once during user gesture (TTS toggle tap)
 const audio = document.createElement('audio');
 audio.id = 'kashra-tts-audio';
@@ -200,47 +200,48 @@ document.body.appendChild(audio);
 // Reused for every TTS response — iOS gesture requirement satisfied
 audio.src = 'data:audio/mp3;base64,' + data.audio;
 audio.play(); // permitted because element was created during gesture
+ 
 
 ---
 
-   Consequences
+## Consequences
 
-  # Positive
+### Positive
 
--  Zero infrastructure  — Cloudflare Workers run at edge, ~0ms cold start, free tier covers ~100K requests/day
--  API keys never exposed  — stored as Cloudflare Worker secrets, inaccessible to client
--  Cross-platform parity  — identical JS code path on iOS and Android
--  Multilingual out of the box  — Google STT auto-detects language from alternativeLanguageCodes
--  Per-user quota  — enforced server-side via Firestore, not bypassable client-side
--  No native plugins  — no Swift/Kotlin maintenance, no plugin compatibility matrix
+- **Zero infrastructure** — Cloudflare Workers run at edge, ~0ms cold start, free tier covers ~100K requests/day
+- **API keys never exposed** — stored as Cloudflare Worker secrets, inaccessible to client
+- **Cross-platform parity** — identical JS code path on iOS and Android
+- **Multilingual out of the box** — Google STT auto-detects language from `alternativeLanguageCodes`
+- **Per-user quota** — enforced server-side via Firestore, not bypassable client-side
+- **No native plugins** — no Swift/Kotlin maintenance, no plugin compatibility matrix
 
-  # Negative
+### Negative
 
--  Latency  — record → upload → STT → AI → TTS pipeline adds ~2–4s vs streaming STT
--  No streaming transcription  — word-by-word display requires WebSocket (gRPC bridge), not implemented
--  Google TTS Neural2 unavailable for Indian languages  — WaveNet used as fallback; quality gap noticeable
--  Cloudflare dependency  — Worker pricing changes could affect cost model at scale
+- **Latency** — record → upload → STT → AI → TTS pipeline adds ~2–4s vs streaming STT
+- **No streaming transcription** — word-by-word display requires WebSocket (gRPC bridge), not implemented
+- **Google TTS Neural2 unavailable for Indian languages** — WaveNet used as fallback; quality gap noticeable
+- **Cloudflare dependency** — Worker pricing changes could affect cost model at scale
 
-  # Neutral
+### Neutral
 
 - `GOOGLE_SPEECH_API_KEY` serves both STT and TTS — simplifies secret management but requires both APIs enabled on the same GCP project
 
 ---
 
-   Alternatives Considered
+## Alternatives Considered
 
-  # WebSocket Streaming (Deepgram)
+### WebSocket Streaming (Deepgram)
 Deepgram's API supports WebSocket-based streaming STT with word-by-word results. This would enable real-time transcription display. Rejected for initial implementation due to additional vendor dependency and pricing uncertainty at scale. Viable future upgrade path.
 
-  # OpenAI Whisper
+### OpenAI Whisper
 High accuracy, language-agnostic. No streaming. Similar latency to Google STT. Rejected because OpenAI TTS has no Indian language support — splitting STT and TTS vendors adds complexity.
 
-  # Native Capacitor Plugin
+### Native Capacitor Plugin
 A custom Swift plugin using `SFSpeechRecognizer` + `AVSpeechSynthesizer` would provide the best iOS performance. Rejected because: (a) equivalent Android plugin required separately, (b) quota enforcement still requires server-side component, (c) maintenance burden for a solo developer.
 
 ---
 
-   Known Issues & Mitigations
+## Known Issues & Mitigations
 
 | Issue | Root Cause | Mitigation |
 |-------|-----------|------------|
@@ -251,7 +252,7 @@ A custom Swift plugin using `SFSpeechRecognizer` + `AVSpeechSynthesizer` would p
 
 ---
 
-   Related Work
+## Related Work
 
 - Capacitor community plugin `@capacitor-community/speech-recognition` — native bridge approach, iOS reliability issues in WKWebView
 - Cloudflare Workers documentation: [Service Worker API](https://developers.cloudflare.com/workers/)
@@ -261,13 +262,14 @@ A custom Swift plugin using `SFSpeechRecognizer` + `AVSpeechSynthesizer` would p
 
 ---
 
-   Future Work
+## Future Work
 
 - [ ] WebSocket streaming STT via Deepgram for word-by-word transcription
 - [ ] Voice Activity Detection (VAD) — auto-stop recording on silence
 - [ ] Refresh token persistence in iOS Keychain (currently memory-only)
 - [ ] npm package: `capacitor-ai-voice-proxy-client` — JS client wrapper
 - [ ] OpenAPI spec for Worker routes
+
 
 ---
 
