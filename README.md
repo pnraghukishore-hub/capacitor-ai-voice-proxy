@@ -1,1 +1,0 @@
-# capacitor-ai-voice-proxy
