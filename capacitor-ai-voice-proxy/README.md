@@ -330,7 +330,7 @@ If you use this in your project or research, please cite:
 
 ```bibtex
 @misc{penmetsa2026capacitorvoice,
-  author = {Penmetsa, Kishore},
+  author = {Naga Raghu Kishore, Penujuri},
   title  = {capacitor-ai-voice-proxy: Serverless AI Voice for Capacitor Hybrid Applications},
   year   = {2026},
   url    = {https://github.com/yourusername/capacitor-ai-voice-proxy},
