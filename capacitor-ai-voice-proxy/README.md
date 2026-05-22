@@ -328,15 +328,15 @@ MIT © 2026 Kishore Penmetsa
 
 If you use this in your project or research, please cite:
 
-```bibtex
+bibtex
 @misc{penmetsa2026capacitorvoice,
   author = {Naga Raghu Kishore, Penujuri},
   title  = {capacitor-ai-voice-proxy: Serverless AI Voice for Capacitor Hybrid Applications},
   year   = {2026},
-  url    = {https://github.com/yourusername/capacitor-ai-voice-proxy},
+  url    = {https://github.com/pnraghukishore-hub/capacitor-ai-voice-proxy},
   note   = {MIT License}
 }
-```
+
 
 ---
 
