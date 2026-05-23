@@ -1,0 +1,261 @@
+/**
+ * capacitor-ai-voice-proxy — Cloudflare Worker
+ *
+ * Routes:
+ *   POST /transcribe  — Google Cloud Speech-to-Text proxy
+ *   POST /speak       — Google Cloud Text-to-Speech proxy
+ *   GET  /health      — Health check
+ *
+ * Required secrets (wrangler secret put <NAME>):
+ *   GOOGLE_SPEECH_API_KEY   — GCP API key with STT + TTS enabled
+ *   FIREBASE_PROJECT_ID     — e.g. "my-app-12345"
+ *
+ * MIT License © 2026 Kishore Penmetsa
+ * https://github.com/yourusername/capacitor-ai-voice-proxy
+ */
+
+// ── Voice map ─────────────────────────────────────────────────────────────
+// Neural2 for English (highest quality), WaveNet for Indian languages
+// Note: Google Neural2 is not available for Indian languages as of 2026
+const VOICE_MAP = {
+  'en-US': { female: 'en-US-Neural2-F', male: 'en-US-Neural2-D' },
+  'en-GB': { female: 'en-GB-Neural2-A', male: 'en-GB-Neural2-B' },
+  'hi-IN': { female: 'hi-IN-Wavenet-A', male: 'hi-IN-Wavenet-B' },
+  'ta-IN': { female: 'ta-IN-Wavenet-A', male: 'ta-IN-Wavenet-B' },
+  'te-IN': { female: 'te-IN-Wavenet-A', male: 'te-IN-Wavenet-B' },
+  'kn-IN': { female: 'kn-IN-Wavenet-A', male: 'kn-IN-Wavenet-B' },
+  'ml-IN': { female: 'ml-IN-Wavenet-A', male: 'ml-IN-Wavenet-B' },
+};
+
+// Indian language codes for STT auto-detection
+const ALT_LANGUAGE_CODES = ['hi-IN', 'ta-IN', 'te-IN', 'kn-IN', 'ml-IN'];
+
+// ── CORS helper ───────────────────────────────────────────────────────────
+function corsResponse(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+function ok(data)      { return corsResponse(JSON.stringify({ ok: true,  ...data }), 200); }
+function err(msg, code) { return corsResponse(JSON.stringify({ ok: false, error: msg }), code); }
+
+// ── Firebase token verification ───────────────────────────────────────────
+// Uses Web Crypto API only — no firebase-admin SDK, no npm dependencies
+async function verifyFirebaseToken(idToken, env) {
+  try {
+    const parts = idToken.split('.');
+    if (parts.length !== 3) return { ok: false };
+
+    const header  = jsonFromB64(parts[0]);
+    const payload = jsonFromB64(parts[1]);
+    const { kid } = header;
+
+    if (!kid || header.alg !== 'RS256') return { ok: false };
+
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload.exp || payload.exp < now)  return { ok: false }; // expired
+    if (!payload.iat || now - payload.iat > 3600) return { ok: false }; // too old
+    if (payload.aud !== env.FIREBASE_PROJECT_ID)  return { ok: false }; // wrong project
+    if (payload.iss !== `https://securetoken.google.com/${env.FIREBASE_PROJECT_ID}`) {
+      return { ok: false };
+    }
+
+    const uid = payload.user_id || payload.sub;
+    if (!uid) return { ok: false };
+
+    // Fetch Google's public JWK set — cached 1hr at edge
+    const jwkResp = await fetch(
+      'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
+      { cf: { cacheTtl: 3600, cacheEverything: true } }
+    );
+    if (!jwkResp.ok) return { ok: false, networkError: true };
+    const jwkSet = await jwkResp.json();
+
+    const jwk = (jwkSet.keys || []).find(k => k.kid === kid);
+    if (!jwk) return { ok: false };
+
+    const cryptoKey = await crypto.subtle.importKey(
+      'jwk', jwk,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false, ['verify']
+    );
+
+    const valid = await crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5',
+      cryptoKey,
+      b64urlToBuffer(parts[2]),
+      new TextEncoder().encode(`${parts[0]}.${parts[1]}`)
+    );
+
+    return valid
+      ? { ok: true, uid, email: payload.email || '' }
+      : { ok: false };
+  } catch (e) {
+    console.warn('[voice-proxy] Token verification error:', e.message);
+    return { ok: false };
+  }
+}
+
+// ── Auth middleware ───────────────────────────────────────────────────────
+async function requireAuth(request, env) {
+  const authHeader = request.headers.get('Authorization') || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return { ok: false, response: err('auth_required', 401) };
+  const result = await verifyFirebaseToken(idToken, env);
+  if (!result.ok) return { ok: false, response: err('auth_invalid', 401) };
+  return { ok: true, uid: result.uid, email: result.email };
+}
+
+// ── /transcribe — Google Speech-to-Text proxy ─────────────────────────────
+async function handleTranscribe(request, env) {
+  const auth = await requireAuth(request, env);
+  if (!auth.ok) return auth.response;
+
+  if (!env.GOOGLE_SPEECH_API_KEY) return err('STT not configured', 503);
+
+  let body;
+  try { body = await request.json(); }
+  catch (e) { return err('Invalid JSON body', 400); }
+
+  const { audio, language } = body;
+  if (!audio) return err('Missing audio field (base64 LINEAR16 WAV)', 400);
+
+  const langCode = language || 'en-US';
+  const altCodes = ALT_LANGUAGE_CODES.filter(c => c !== langCode);
+
+  const sttResp = await fetch(
+    `https://speech.googleapis.com/v1/speech:recognize?key=${env.GOOGLE_SPEECH_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        config: {
+          encoding: 'LINEAR16',
+          sampleRateHertz: 16000,
+          languageCode: langCode,
+          alternativeLanguageCodes: altCodes,
+          enableAutomaticPunctuation: true,
+          model: 'latest_short',
+        },
+        audio: { content: audio },
+      }),
+    }
+  );
+
+  if (!sttResp.ok) {
+    const detail = await sttResp.text();
+    console.warn('[voice-proxy] STT error:', sttResp.status, detail.slice(0, 120));
+    return err('STT failed', 502);
+  }
+
+  const sttData = await sttResp.json();
+  const transcript   = sttData.results?.[0]?.alternatives?.[0]?.transcript || '';
+  const detectedLang = sttData.results?.[0]?.languageCode || langCode;
+
+  console.log(`[voice-proxy] transcribe_ok uid=${auth.uid} lang=${detectedLang} chars=${transcript.length}`);
+  return ok({ transcript, language: detectedLang });
+}
+
+// ── /speak — Google Text-to-Speech proxy ──────────────────────────────────
+async function handleSpeak(request, env) {
+  const auth = await requireAuth(request, env);
+  if (!auth.ok) return auth.response;
+
+  if (!env.GOOGLE_SPEECH_API_KEY) return err('TTS not configured', 503);
+
+  let body;
+  try { body = await request.json(); }
+  catch (e) { return err('Invalid JSON body', 400); }
+
+  const { text, language, gender } = body;
+  if (!text) return err('Missing text field', 400);
+
+  const langCode  = language || 'en-US';
+  const genderKey = gender === 'male' ? 'male' : 'female';
+  const voiceName = (VOICE_MAP[langCode] || VOICE_MAP['en-US'])[genderKey];
+
+  const ttsResp = await fetch(
+    `https://texttospeech.googleapis.com/v1/text:synthesize?key=${env.GOOGLE_SPEECH_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: { text: text.slice(0, 1000) },
+        voice: { languageCode: langCode, name: voiceName },
+        audioConfig: {
+          audioEncoding: 'MP3',
+          speakingRate: 1.05,   // Slightly faster than default — more natural
+          pitch: -1.0,          // Slightly warmer tone
+          effectsProfileId: ['headphone-class-device'], // Optimised for mobile
+        },
+      }),
+    }
+  );
+
+  if (!ttsResp.ok) {
+    const detail = await ttsResp.text();
+    console.warn('[voice-proxy] TTS error:', ttsResp.status, detail.slice(0, 120));
+    return err('TTS failed', 502);
+  }
+
+  const ttsData = await ttsResp.json();
+  if (!ttsData.audioContent) return err('TTS returned empty audio', 502);
+
+  console.log(`[voice-proxy] speak_ok uid=${auth.uid} lang=${langCode} voice=${voiceName} chars=${text.length}`);
+  return ok({ audio: ttsData.audioContent, voice: voiceName });
+}
+
+// ── Main fetch handler ────────────────────────────────────────────────────
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Preflight
+    if (request.method === 'OPTIONS') return corsResponse(null, 204);
+
+    // Health check — no auth required
+    if (request.method === 'GET' && url.pathname === '/health') {
+      return ok({
+        version: '1.0.0',
+        ts: new Date().toISOString(),
+        routes: ['/transcribe', '/speak'],
+      });
+    }
+
+    // STT
+    if (request.method === 'POST' && url.pathname === '/transcribe') {
+      return handleTranscribe(request, env);
+    }
+
+    // TTS
+    if (request.method === 'POST' && url.pathname === '/speak') {
+      return handleSpeak(request, env);
+    }
+
+    return err('Not found', 404);
+  },
+};
+
+// ── Crypto utilities ──────────────────────────────────────────────────────
+function jsonFromB64(b64url) {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64 + '=='.slice(0, (4 - b64.length % 4) % 4);
+  return JSON.parse(atob(pad));
+}
+
+function b64urlToBuffer(b64url) {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64 + '=='.slice(0, (4 - b64.length % 4) % 4);
+  const binary = atob(pad);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
