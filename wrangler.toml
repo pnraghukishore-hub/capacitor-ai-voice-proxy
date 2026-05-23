@@ -1,0 +1,31 @@
+name = "capacitor-ai-voice-proxy"
+main = "worker/voice-proxy.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
+
+# ── Custom domain (optional but recommended) ──────────────────────────────
+# Uncomment and configure after deployment:
+# routes = [
+#   { pattern = "api.yourdomain.com/transcribe", zone_name = "yourdomain.com" },
+#   { pattern = "api.yourdomain.com/speak",      zone_name = "yourdomain.com" }
+# ]
+
+# ── Secrets ───────────────────────────────────────────────────────────────
+# Set via: wrangler secret put <SECRET_NAME>
+# Never commit secrets to source control.
+#
+# Required:
+#   GOOGLE_SPEECH_API_KEY   — GCP API key (STT + TTS APIs enabled)
+#   FIREBASE_PROJECT_ID     — e.g. "my-firebase-project-12345"
+#
+# Verify your secrets are set:
+#   wrangler secret list
+
+[observability]
+enabled = true
+
+# ── Local dev vars (.dev.vars file, gitignored) ───────────────────────────
+# Create a .dev.vars file locally for wrangler dev:
+#
+# GOOGLE_SPEECH_API_KEY=AIza...
+# FIREBASE_PROJECT_ID=my-project-12345

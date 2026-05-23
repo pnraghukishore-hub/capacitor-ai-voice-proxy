@@ -1,0 +1,59 @@
+{
+  "name": "capacitor-ai-voice-proxy",
+  "version": "1.0.0",
+  "description": "Multilingual AI voice (STT + TTS) for Capacitor hybrid apps — no backend server, no exposed API keys, no native plugins.",
+  "main": "client/voice-client.js",
+  "files": [
+    "client/",
+    "worker/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "wrangler.toml"
+  ],
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "keywords": [
+    "capacitor",
+    "ionic",
+    "speech-to-text",
+    "text-to-speech",
+    "voice",
+    "stt",
+    "tts",
+    "cloudflare-workers",
+    "firebase",
+    "google-cloud",
+    "hybrid-app",
+    "ios",
+    "android",
+    "wkwebview",
+    "multilingual",
+    "hindi",
+    "telugu",
+    "tamil",
+    "nri"
+  ],
+  "author": {
+    "name": "Naga Raghu Kishore, Penujuri",
+    "url": "https://github.com/pnraghukishore-hub/"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pnraghukishore-hub/capacitor-ai-voice-proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pnraghukishore-hub/capacitor-ai-voice-proxy/issues"
+  },
+  "homepage": "https://github.com/pnraghukishore-hub/capacitor-ai-voice-proxy#readme",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
